@@ -1,0 +1,23 @@
+sequence:
+  - action: shell_command.system_info
+    metadata: {}
+    data:
+      server: |
+        {{server}}
+    response_variable: info
+  - variables:
+      return: |
+        {{{ 'info' : info.stdout }}}
+  - stop: ""
+    response_variable: return
+alias: ai_linux_info
+description: |-
+  requests linux info from selected server/system.
+  use this script when asked system info about a system
+  be very brief if no additional information is asked  dont say any * 
+fields:
+  server:
+    selector:
+      text: null
+    name: server
+    description: the linux server name
