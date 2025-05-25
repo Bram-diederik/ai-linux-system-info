@@ -1,10 +1,11 @@
 #!/bin/bash
 
 set -e
-
-KEY_DIR="/share/sys_info"
+KEY_DIR="$(pwd)/keys"
 KEY_PATH="$KEY_DIR/key"
-HOSTS_FILE="$KEY_DIR/hosts"
+HOSTS_FILE="$(pwd)/etc/hosts"
+
+
 NAME="$1"
 REMOTE="$2"
 
@@ -27,21 +28,22 @@ mkdir -p "$KEY_DIR"
 if [ ! -f "$KEY_PATH" ]; then
     echo "[+] Generating SSH key..."
     ssh-keygen -C "homeassistant_sys_info_key" -t ed25519 -N "" -f "$KEY_PATH"
-else
-    echo "[+] SSH key already exists at $KEY_PATH"
 fi
 
-# Step 2: Copy public key to remote
-echo "[+] Installing SSH key on remote: $REMOTE"
-ssh-copy-id -i "$KEY_PATH.pub" "$REMOTE"
+    echo "[+] Trying if previous installation is present"
+if echo "update" | ssh -o StrictHostKeyChecking=accept-new -i "$KEY_PATH" "$REMOTE" >/dev/null 2>&1; then
+    echo "[✓] SSH key already installed and working"
+else
+    echo "[+] Installing SSH key on remote: $REMOTE"
+    ssh-copy-id -i "$KEY_PATH.pub" "$REMOTE"
 
-# Step 3: Ensure /home/$USER/bin exists on remote
-echo "[+] Ensuring ~/bin exists on remote"
-ssh -i "$KEY_PATH" "$REMOTE" 'mkdir -p ~/bin'
+    echo "[+] Ensuring ~/bin exists on remote"
+    ssh -i "$KEY_PATH" "$REMOTE" 'mkdir -p ~/bin'
+fi
 
 # Step 4: Copy the sys_info.sh script to remote
 echo "[+] Copying sys_info.sh to /home/$USER/bin"
-scp -i "$KEY_PATH" sys_info.sh "$REMOTE:/home/$USER/bin/sys_info.sh"
+scp -i "$KEY_PATH" ./bin/sys_info.sh "$REMOTE:/home/$USER/bin/sys_info.sh"
 ssh -i "$KEY_PATH" "$REMOTE" 'chmod +x /home/$USER/bin/sys_info.sh'
 
 # Step 5: Run setup
@@ -51,15 +53,17 @@ ssh -t -i "$KEY_PATH" "$REMOTE" "/home/$USER/bin/sys_info.sh setup"
 # Step 6: Restrict key
 echo "[+] Restricting SSH key in authorized_keys..."
 REMOTE_KEY=$(< "$KEY_PATH.pub")
-FORCE_CMD="command=\"/home/$USER/bin/sys_info.sh\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,restrict"
+FORCE_LINE='command="/home/'"$USER"'/bin/sys_info.sh $(cat)",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,restrict '"$REMOTE_KEY"''
 
-ssh -i "$KEY_PATH" "$REMOTE" "
-    mkdir -p /home/$USER/.ssh &&
-    grep -v 'homeassistant_sys_info_key' /home/$USER/.ssh/authorized_keys > /home/$USER/.ssh/authorized_keys.tmp &&
-    echo '$FORCE_CMD $REMOTE_KEY' >> /home/$USER/.ssh/authorized_keys.tmp &&
-    mv /home/$USER/.ssh/authorized_keys.tmp /home/$USER/.ssh/authorized_keys &&
-    chmod 600 /home/$USER/.ssh/authorized_keys
-"
+ssh -i "$KEY_PATH" "$REMOTE" bash <<EOF
+mkdir -p /home/$USER/.ssh
+grep -v 'homeassistant_sys_info_key' /home/$USER/.ssh/authorized_keys > /home/$USER/.ssh/authorized_keys.tmp
+echo '$FORCE_LINE' >> /home/$USER/.ssh/authorized_keys.tmp
+mv /home/$USER/.ssh/authorized_keys.tmp /home/$USER/.ssh/authorized_keys
+chmod 600 /home/$USER/.ssh/authorized_keys
+EOF
+
+
 
 # Step 7: Save host alias
 echo "[+] Saving connection under name: $NAME"
