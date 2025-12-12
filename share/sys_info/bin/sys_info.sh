@@ -7,6 +7,7 @@ AUTHORIZED_KEYS="${HOME}/.ssh/authorized_keys"
 KEY_IDENTIFIER="homeassistant_sys_info_key"
 SCRIPT_URL="https://raw.githubusercontent.com/Bram-diederik/ai-linux-system-info/refs/heads/main/share/sys_info/bin/sys_info.sh"
 USE_SUDO_DOCKER=true
+ENABLE_DOCKER=true
 SCRIPT_VERSION="2.0-secure"
 GITHUB_REPO="Bram-diederik/ai-linux-system-info"
 GITHUB_BRANCH="main"
@@ -51,16 +52,31 @@ check_requirements() {
 }
 
 load_docker_preference() {
-    if [[ -f "$CONFIG_FILE" ]] && grep -q "^#use_sudo_docker=" "$CONFIG_FILE"; then
-        if grep -q "^#use_sudo_docker=true" "$CONFIG_FILE"; then
-            USE_SUDO_DOCKER=true
-        else
-            USE_SUDO_DOCKER=false
+    if [[ -f "$CONFIG_FILE" ]]; then
+        if grep -q "^#enable_docker=" "$CONFIG_FILE"; then
+            if grep -q "^#enable_docker=true" "$CONFIG_FILE"; then
+                ENABLE_DOCKER=true
+            else
+                ENABLE_DOCKER=false
+            fi
+        fi
+        
+        if grep -q "^#use_sudo_docker=" "$CONFIG_FILE"; then
+            if grep -q "^#use_sudo_docker=true" "$CONFIG_FILE"; then
+                USE_SUDO_DOCKER=true
+            else
+                USE_SUDO_DOCKER=false
+            fi
         fi
     fi
 }
 
 docker_cmd() {
+    if [[ "$ENABLE_DOCKER" == "false" ]]; then
+        echo "Docker is disabled in configuration" >&2
+        return 1
+    fi
+    
     if [[ "$USE_SUDO_DOCKER" == "true" ]]; then
         sudo docker "$@"
     else
@@ -126,13 +142,26 @@ setup_config() {
         fi
     fi
 
-    echo "Docker access configuration:"
-    if ask_yes_no "Do you need to use 'sudo' for docker commands?"; then
-        USE_SUDO_DOCKER=true
-        echo "Will use 'sudo docker' for Docker commands."
+    # First ask: Do you want to use Docker at all?
+    echo "=== Docker Configuration ==="
+    if ask_yes_no "Do you want to use Docker monitoring?"; then
+        ENABLE_DOCKER=true
+        echo "✅ Docker monitoring enabled"
+        echo
+        
+        # Only ask about sudo if Docker is enabled
+        echo "Docker access configuration:"
+        if ask_yes_no "Do you need to use 'sudo' for docker commands?"; then
+            USE_SUDO_DOCKER=true
+            echo "Will use 'sudo docker' for Docker commands."
+        else
+            USE_SUDO_DOCKER=false
+            echo "Will use 'docker' without sudo (requires user in docker group)."
+        fi
     else
+        ENABLE_DOCKER=false
         USE_SUDO_DOCKER=false
-        echo "Will use 'docker' without sudo (requires user in docker group)."
+        echo "❌ Docker monitoring disabled."
     fi
     echo
 
@@ -141,28 +170,38 @@ setup_config() {
         ask_yes_no "Battery detected. Include battery info in output?" && include_battery="true"
     fi
 
+    # Collect Systemd Services
     mapfile -t all_services < <(systemctl list-unit-files --type=service | awk '{print $1}' | grep '\.service$' | sort)
     
+    # Collect Docker Images (only if Docker is enabled)
     local docker_images=()
-    if command -v docker &>/dev/null || command -v sudo &>/dev/null; then
-        echo "Checking for Docker images..."
-        if docker_cmd images &>/dev/null; then
-            mapfile -t docker_images < <(docker_cmd images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -v "<none>" | sort -u)
-            echo "Found ${#docker_images[@]} Docker images."
-        else
-            echo "Cannot access Docker. Make sure Docker is running and you have proper permissions."
+    if [[ "$ENABLE_DOCKER" == "true" ]]; then
+        if command -v docker &>/dev/null || command -v sudo &>/dev/null; then
+            echo "Checking for Docker images..."
+            if docker_cmd images &>/dev/null; then
+                mapfile -t docker_images < <(docker_cmd images --format "{{.Repository}}:{{.Tag}}" 2>/dev/null | grep -v "<none>" | sort -u)
+                echo "Found ${#docker_images[@]} Docker images."
+            else
+                echo "Cannot access Docker. Make sure Docker is running and you have proper permissions."
+            fi
         fi
     fi
 
+    # Build dialog options
     local dialog_options=()
     
     for service in "${all_services[@]}"; do
-        dialog_options+=("service:$service" "Systemd Service" off)
+        dialog_options+=("service:$service" "$service" off)
     done
     
     for image in "${docker_images[@]}"; do
-        dialog_options+=("docker:$image" "Docker Image" off)
+        dialog_options+=("docker:$image" "$image" off)
     done
+
+    if [ ${#dialog_options[@]} -eq 0 ]; then
+        echo "No services or Docker images available for selection."
+        exit 1
+    fi
 
     local selected_items
     selected_items=$(ask_checklist "Select services and/or Docker images to monitor:" "${dialog_options[@]}")
@@ -174,6 +213,7 @@ setup_config() {
 
     {
         echo "#include_battery=${include_battery}"
+        echo "#enable_docker=${ENABLE_DOCKER}"
         echo "#use_sudo_docker=${USE_SUDO_DOCKER}"
         echo "#version=${SCRIPT_VERSION}"
         echo "#last_updated=$(date -Iseconds)"
@@ -219,6 +259,12 @@ show_service_info() {
 
 show_docker_info() {
     local docker_name="$1"
+    
+    if [[ "$ENABLE_DOCKER" == "false" ]]; then
+        echo "Docker monitoring is disabled in configuration."
+        echo "Run '$0 setup' to enable Docker monitoring."
+        return
+    fi
     
     echo "=== Docker Information: $docker_name ==="
     echo
@@ -302,11 +348,19 @@ run_status() {
         fi
     fi
     
-    if command -v docker_cmd &>/dev/null && docker_cmd --version &>/dev/null; then
-        echo "Docker Status:"
-        echo "  Version:    $(docker_cmd --version | cut -d' ' -f3- | tr -d ',')"
-        echo "  Containers: $(docker_cmd ps -q 2>/dev/null | wc -l) running, $(docker_cmd ps -aq 2>/dev/null | wc -l) total"
-        echo "  Images:     $(docker_cmd images -q 2>/dev/null | wc -l) total"
+    # Only show Docker info if enabled
+    if [[ "$ENABLE_DOCKER" == "true" ]]; then
+        if command -v docker &>/dev/null; then
+            echo "Docker Status:"
+            echo "  Version:    $(docker --version | cut -d' ' -f3- | tr -d ',')"
+            echo "  Enabled:    Yes"
+            echo "  Use sudo:   $USE_SUDO_DOCKER"
+            echo "  Containers: $(docker_cmd ps -q 2>/dev/null | wc -l) running, $(docker_cmd ps -aq 2>/dev/null | wc -l) total"
+            echo "  Images:     $(docker_cmd images -q 2>/dev/null | wc -l) total"
+            echo
+        fi
+    else
+        echo "Docker Status: Disabled (run '$0 setup' to enable)"
         echo
     fi
     
@@ -354,6 +408,13 @@ run_status() {
             journalctl -u "$service_name" -n 10 --no-pager 2>/dev/null || echo "(No logs found)"
             echo
         elif [[ "$item" == docker:* ]]; then
+            if [[ "$ENABLE_DOCKER" == "false" ]]; then
+                echo "Docker monitoring is disabled."
+                echo "Run '$0 setup' to enable Docker monitoring."
+                echo
+                continue
+            fi
+            
             local image_name="${item#docker:}"
             echo "=== Docker Image: $image_name ==="
             
@@ -416,6 +477,11 @@ info() {
             show_service_info "$name"
             ;;
         docker)
+            if [[ "$ENABLE_DOCKER" == "false" ]]; then
+                echo "Error: Docker monitoring is disabled."
+                echo "Run '$0 setup' to enable Docker monitoring."
+                exit 1
+            fi
             show_docker_info "$name"
             ;;
         *)
@@ -424,7 +490,6 @@ info() {
             ;;
     esac
 }
-
 
 # SECURE: Safe update script with restriction verification
 update_script() {
@@ -495,7 +560,6 @@ update_script() {
     rm -f "$temp_script"
 }
 
-
 # Load docker preference at startup
 load_docker_preference
 
@@ -516,6 +580,8 @@ case "$1" in
         ;;
     --version|-v)
         echo "sys_info.sh version: ${SCRIPT_VERSION}"
+        echo "Docker enabled: ${ENABLE_DOCKER}"
+        echo "Use sudo for Docker: ${USE_SUDO_DOCKER}"
         echo "Security: RESTRICTIONS_LOCKED=${RESTRICTIONS_LOCKED}"
         ;;
     *)
@@ -526,6 +592,11 @@ case "$1" in
         echo "  run                - Display full system information and logs"
         echo "  info <type> <name> - Show specific service/docker logs"
         echo "  update-script      - Securely update from GitHub (verifies restrictions)"
+        echo ""
+        echo "Configuration:"
+        echo "  Docker enabled:    ${ENABLE_DOCKER}"
+        echo "  Use sudo for Docker: ${USE_SUDO_DOCKER}"
+        echo ""
         echo "Examples:"
         echo "  $0 info service nginx"
         echo "  $0 info docker mysql:latest"
