@@ -8,7 +8,7 @@ KEY_IDENTIFIER="homeassistant_sys_info_key"
 SCRIPT_URL="https://raw.githubusercontent.com/Bram-diederik/ai-linux-system-info/refs/heads/main/share/sys_info/bin/sys_info.sh"
 USE_SUDO_DOCKER=true
 ENABLE_DOCKER=true
-SCRIPT_VERSION="2.0-secure"
+SCRIPT_VERSION="2.0"
 GITHUB_REPO="Bram-diederik/ai-linux-system-info"
 GITHUB_BRANCH="main"
 
@@ -84,7 +84,6 @@ docker_cmd() {
     fi
 }
 
-# SECURE: Verify SSH restrictions are present
 verify_ssh_restrictions() {
     if [[ -f "$AUTHORIZED_KEYS" ]] && grep -q "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS"; then
         local key_line=$(grep "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS")
@@ -100,7 +99,6 @@ verify_ssh_restrictions() {
 }
 
 setup_config() {
-    # SECURE: Always verify restrictions first
     verify_ssh_restrictions || echo "Continuing setup despite restriction warnings..."
     
     mkdir -p "$(dirname "$CONFIG_FILE")"
@@ -173,9 +171,27 @@ setup_config() {
     # Collect Systemd Services
     mapfile -t all_services < <(systemctl list-unit-files --type=service | awk '{print $1}' | grep '\.service$' | sort)
     
-    # Collect Docker Images (only if Docker is enabled)
-    local docker_images=()
+    # First dialog: Systemd Services
+    local service_options=()
+    local selected_services=""
+    
+    for service in "${all_services[@]}"; do
+        service_options+=("$service" "$service" off)
+    done
+    
+    if [ ${#service_options[@]} -gt 0 ]; then
+        selected_services=$(ask_checklist "Select Systemd Services to monitor:" "${service_options[@]}")
+    else
+        echo "No Systemd services found."
+        selected_services=""
+    fi
+
+    # Second dialog: Docker Images (only if Docker is enabled)
+    local docker_options=()
+    local selected_docker=""
+    
     if [[ "$ENABLE_DOCKER" == "true" ]]; then
+        local docker_images=()
         if command -v docker &>/dev/null || command -v sudo &>/dev/null; then
             echo "Checking for Docker images..."
             if docker_cmd images &>/dev/null; then
@@ -185,28 +201,36 @@ setup_config() {
                 echo "Cannot access Docker. Make sure Docker is running and you have proper permissions."
             fi
         fi
+        
+        for image in "${docker_images[@]}"; do
+            docker_options+=("$image" "$image" off)
+        done
+        
+        if [ ${#docker_options[@]} -gt 0 ]; then
+            selected_docker=$(ask_checklist "Select Docker Images to monitor:" "${docker_options[@]}")
+        else
+            echo "No Docker images available for selection."
+            selected_docker=""
+        fi
     fi
 
-    # Build dialog options
-    local dialog_options=()
+    # Combine selections
+    local combined_selections=""
     
-    for service in "${all_services[@]}"; do
-        dialog_options+=("service:$service" "$service" off)
-    done
+    # Add service selections with "service:" prefix
+    while IFS= read -r service; do
+        [[ -n "$service" ]] && combined_selections+="service:$service"$'\n'
+    done <<< "$selected_services"
     
-    for image in "${docker_images[@]}"; do
-        dialog_options+=("docker:$image" "$image" off)
-    done
+    # Add docker selections with "docker:" prefix
+    while IFS= read -r image; do
+        [[ -n "$image" ]] && combined_selections+="docker:$image"$'\n'
+    done <<< "$selected_docker"
+    
+    # Remove trailing newline if any
+    combined_selections=$(echo "$combined_selections" | sed '/^$/d')
 
-    if [ ${#dialog_options[@]} -eq 0 ]; then
-        echo "No services or Docker images available for selection."
-        exit 1
-    fi
-
-    local selected_items
-    selected_items=$(ask_checklist "Select services and/or Docker images to monitor:" "${dialog_options[@]}")
-
-    if [ -z "$selected_items" ]; then
+    if [[ -z "$combined_selections" ]]; then
         echo "No items selected."
         exit 1
     fi
@@ -217,7 +241,7 @@ setup_config() {
         echo "#use_sudo_docker=${USE_SUDO_DOCKER}"
         echo "#version=${SCRIPT_VERSION}"
         echo "#last_updated=$(date -Iseconds)"
-        echo "$selected_items"
+        echo "$combined_selections"
     } > "$CONFIG_FILE"
     echo "Saved selection to $CONFIG_FILE"
 }
@@ -491,9 +515,7 @@ info() {
     esac
 }
 
-# SECURE: Safe update script with restriction verification
 update_script() {
-    echo "🔒 Secure update from GitHub..."
     echo "Verifying current SSH restrictions..."
     
     if ! verify_ssh_restrictions; then
@@ -576,7 +598,6 @@ case "$1" in
         ;;
     update-script)
         update_script
-        setup_config
         ;;
     --version|-v)
         echo "sys_info.sh version: ${SCRIPT_VERSION}"
@@ -587,11 +608,11 @@ case "$1" in
     *)
         echo "Usage: $0 [COMMAND]"
         echo ""
-        echo "🔒 SECURE COMMANDS:"
+        echo "COMMANDS:"
         echo "  setup              - Configure services and Docker images to monitor"
         echo "  run                - Display full system information and logs"
         echo "  info <type> <name> - Show specific service/docker logs"
-        echo "  update-script      - Securely update from GitHub (verifies restrictions)"
+        echo "  update-script      - Update from GitHub"
         echo ""
         echo "Configuration:"
         echo "  Docker enabled:    ${ENABLE_DOCKER}"
