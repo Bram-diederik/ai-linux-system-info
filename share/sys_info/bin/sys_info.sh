@@ -77,42 +77,10 @@ verify_ssh_restrictions() {
         if ! echo "$key_line" | grep -q 'command=\|no-port-forwarding\|no-X11-forwarding\|restrict'; then
             echo "⚠️  WARNING: SSH key restrictions missing for $KEY_IDENTIFIER!"
             echo "This could be a security risk."
-            read -rp "Do you want to reapply restrictions? [y/N]: " answer
-            if [[ "$answer" =~ ^[Yy]$ ]]; then
-                reapply_restrictions
-            fi
-            return 1
+            echo "Remove the key and install again"
         fi
     fi
     return 0
-}
-
-# SECURE: Reapply restrictions if missing
-reapply_restrictions() {
-    if [ ! -f "$AUTHORIZED_KEYS" ]; then
-        echo "No authorized_keys file found."
-        return 1
-    fi
-
-    local temp_file="${AUTHORIZED_KEYS}.secure"
-    
-    while IFS= read -r line; do
-        if [[ "$line" == *"$KEY_IDENTIFIER"* ]]; then
-            # Extract just the key part
-            local key_part=$(echo "$line" | sed -E 's/.*(ssh-[^ ]+ [^ ]+).*/\1/')
-            if [ -n "$key_part" ]; then
-                echo "command=\"$0 \$(cat)\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,restrict $key_part $KEY_IDENTIFIER" >> "$temp_file"
-                echo "✅ Reapplied restrictions to key"
-            fi
-        else
-            echo "$line" >> "$temp_file"
-        fi
-    done < "$AUTHORIZED_KEYS"
-    
-    if [ -f "$temp_file" ]; then
-        mv "$temp_file" "$AUTHORIZED_KEYS"
-        chmod 600 "$AUTHORIZED_KEYS"
-    fi
 }
 
 setup_config() {
@@ -457,11 +425,9 @@ info() {
     esac
 }
 
-# SECURE: Removed dangerous update_key function
-# This prevents removing SSH restrictions
 
 # SECURE: Safe update script with restriction verification
-update_script_secure() {
+update_script() {
     echo "🔒 Secure update from GitHub..."
     echo "Verifying current SSH restrictions..."
     
@@ -491,24 +457,6 @@ update_script_secure() {
     else
         echo "❌ Need curl or wget to update"
         exit 1
-    fi
-    
-    # SECURE: Check if new script contains dangerous functions
-    if grep -q "update_key\|sed.*authorized_keys.*clean\|sed.*ssh-ed25519" "$temp_script"; then
-        echo "⚠️  SECURITY ALERT: New script contains dangerous operations!"
-        echo "Aborting update to prevent removal of SSH restrictions."
-        rm -f "$temp_script"
-        exit 1
-    fi
-    
-    # SECURE: Check if new script has security features
-    if ! grep -q "verify_ssh_restrictions\|RESTRICTIONS_LOCKED" "$temp_script"; then
-        echo "⚠️  New script missing security features!"
-        read -rp "Continue anyway? (not recommended) [y/N]: " answer
-        if [[ ! "$answer" =~ ^[Yy]$ ]]; then
-            rm -f "$temp_script"
-            exit 1
-        fi
     fi
     
     # Make backup
@@ -547,83 +495,6 @@ update_script_secure() {
     rm -f "$temp_script"
 }
 
-# SECURE: Safe key removal with confirmation
-remove_key_secure() {
-    if [ ! -f "$AUTHORIZED_KEYS" ]; then
-        echo "No authorized_keys file found."
-        exit 1
-    fi
-
-    local match_count=$(grep -c "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS")
-
-    if (( match_count == 0 )); then
-        echo "No key with identifier '$KEY_IDENTIFIER' found."
-        return
-    fi
-
-    echo "⚠️  WARNING: This will remove the SSH key for sys_info access!"
-    echo "Key identifier: $KEY_IDENTIFIER"
-    read -rp "Are you sure? Type 'YES' to confirm: " confirmation
-    
-    if [[ "$confirmation" != "YES" ]]; then
-        echo "Aborted."
-        exit 1
-    fi
-    
-    # Create backup
-    cp "$AUTHORIZED_KEYS" "${AUTHORIZED_KEYS}.bak.$(date +%s)"
-    
-    # Remove key
-    grep -v "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS" > "${AUTHORIZED_KEYS}.tmp" &&
-    mv "${AUTHORIZED_KEYS}.tmp" "$AUTHORIZED_KEYS"
-    chmod 600 "$AUTHORIZED_KEYS"
-    
-    echo "✅ Removed SSH key with identifier: $KEY_IDENTIFIER"
-    echo "⚠️  Backup saved as: ${AUTHORIZED_KEYS}.bak.*"
-}
-
-# Security verification command
-verify_restrictions() {
-    echo "🔒 SSH Restriction Verification"
-    echo "==============================="
-    
-    if verify_ssh_restrictions; then
-        echo "✅ SSH restrictions are properly configured"
-        
-        # Show the restricted key line
-        if grep -q "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS" 2>/dev/null; then
-            echo ""
-            echo "Current restricted key:"
-            grep "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS"
-        fi
-    else
-        echo "❌ SSH restrictions are missing or incomplete"
-        echo ""
-        echo "Current key line:"
-        grep "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS" 2>/dev/null || echo "Key not found"
-        echo ""
-        echo "Run '$0 reapply-restrictions' to fix this."
-        exit 1
-    fi
-}
-
-# Security check at startup
-security_check() {
-    # Don't check if we're running setup or help commands
-    case "$1" in
-        setup|--help|-h|--version)
-            return 0
-            ;;
-    esac
-    
-    # Only verify if key exists
-    if [[ -f "$AUTHORIZED_KEYS" ]] && grep -q "$KEY_IDENTIFIER" "$AUTHORIZED_KEYS"; then
-        if ! verify_ssh_restrictions; then
-            echo "⚠️  SECURITY WARNING: SSH restrictions compromised!" >&2
-            echo "Run '$0 verify-restrictions' for details" >&2
-        fi
-    fi
-}
 
 # Load docker preference at startup
 load_docker_preference
@@ -642,17 +513,9 @@ case "$1" in
         shift
         info "$@"
         ;;
-    remove-key|remove)
-        remove_key_secure
-        ;;
-    update-script|update)
-        update_script_secure
-        ;;
-    verify-restrictions|verify)
-        verify_restrictions
-        ;;
-    reapply-restrictions|fix-restrictions)
-        reapply_restrictions
+    update-script)
+        update_script
+        setup_config
         ;;
     --version|-v)
         echo "sys_info.sh version: ${SCRIPT_VERSION}"
@@ -665,18 +528,10 @@ case "$1" in
         echo "  setup              - Configure services and Docker images to monitor"
         echo "  run                - Display full system information and logs"
         echo "  info <type> <name> - Show specific service/docker logs"
-        echo "  remove-key         - Safely remove SSH key (with confirmation)"
         echo "  update-script      - Securely update from GitHub (verifies restrictions)"
-        echo ""
-        echo "🔐 SECURITY COMMANDS:"
-        echo "  verify-restrictions - Check SSH key restrictions"
-        echo "  reapply-restrictions - Fix missing SSH restrictions"
-        echo "  --version          - Show version and security status"
-        echo ""
         echo "Examples:"
         echo "  $0 info service nginx"
         echo "  $0 info docker mysql:latest"
-        echo "  $0 verify-restrictions"
         exit 1
         ;;
 esac
