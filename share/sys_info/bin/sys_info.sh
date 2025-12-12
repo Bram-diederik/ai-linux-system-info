@@ -499,9 +499,6 @@ update_script() {
 # Load docker preference at startup
 load_docker_preference
 
-# Run security check
-security_check "$1"
-
 case "$1" in
     setup)
         setup_config
